@@ -89,6 +89,8 @@ export default {
       timerInterval: null,
 
       pressedBubbleIds: new Set(),
+
+      pushedBubbles: new Map(),
     }
   },
   computed: {
@@ -124,6 +126,44 @@ export default {
         yellow: 'Жёлтый'
       }
       return names[this.targetColor] || this.targetColor
+    },
+    bubbleConfig() {
+      return [
+        { name: 'small',  radius: 30, sizePenalties: this.pointsForWrong * 0.6, escapePenalties: -3,  speedMultiplier: 1.0 },
+        { name: 'medium', radius: 45, sizePenalties: this.pointsForWrong,       escapePenalties: -5,  speedMultiplier: 0.8 },
+        { name: 'large',  radius: 60, sizePenalties: this.pointsForWrong * 1.4, escapePenalties: -10, speedMultiplier: 0.6 }
+      ]
+    },
+    pushDistanceMap() {
+      return {
+        large: {
+          large: 1.0,
+          medium: 1.5,
+          small: 2.0
+        },
+        medium: {
+          large: 0.5,
+          medium: 1.0,
+          small: 1.5
+        },
+        small: {
+          large: 0.25,
+          medium: 0.5,
+          small: 1.0
+        }
+      }
+    },
+    allColors() {
+      return ['white', 'blue', 'red', 'green', 'yellow', 'purple', 'pink', 'orange']
+    },
+    gameColors() {
+      let colors = this.allColors.slice(0, this.totalColors)
+      if (!colors.includes(this.targetColor)) {
+        colors = colors.slice(0, -1)
+        colors.push(this.targetColor)
+      }
+      
+      return colors
     }
   },
   mounted() {
@@ -150,7 +190,7 @@ export default {
   methods: {
     handleCanvasMouseDown(event) {
       if (this.paused || this.gameOver) return
-
+    
       const rect = this.$refs.canvas.getBoundingClientRect()
       const scaleX = this.canvasWidth / rect.width
       const scaleY = this.canvasHeight / rect.height
@@ -160,9 +200,7 @@ export default {
       
       const clickedBubbles = this.bubbles.filter(bubble => {
         if (!bubble.active) return false
-        const dx = clickX - bubble.x
-        const dy = clickY - bubble.y
-        const distance = Math.sqrt(dx * dx + dy * dy)
+        const distance = this.euclideanDistance(clickX, clickY, bubble.x, bubble.y)
         const speedMagnitude = Math.sqrt(bubble.speedX * bubble.speedX + bubble.speedY * bubble.speedY)
         const clickRadius = bubble.radius + Math.min(20, speedMagnitude * 3)
         return distance <= clickRadius
@@ -178,16 +216,34 @@ export default {
 
       let totalPoints = 0
       let hadCorrect = false
+      const allNewBubbles = []
       
       clickedBubbles.forEach(bubble => {
+        if (bubble.isPopped) return
+
+        bubble.isPopped = true
+
         const isCorrect = bubble.color === this.targetColor
-        const points = isCorrect ? this.pointsForCorrect : this.pointsForWrong
+        let points
+
+        if (isCorrect) {
+          points = this.pointsForCorrect
+        } else {
+          const config = this.bubbleConfig.find(c => c.name === bubble.sizeName)
+          points = config.sizePenalties
+        }
+
         totalPoints += points * (isCorrect ? this.multiplier : 1)
         
         if (isCorrect) {
           hadCorrect = true
           this.multiplier = Math.min(3, this.multiplier + 0.1)
         }
+
+        const childBubbles = this.handleBubbleSplit(bubble)
+        allNewBubbles.push(...childBubbles)
+
+        this.pushBubblesAway(bubble, 2)
       })
       
       if (!hadCorrect && clickedBubbles.length > 0) {
@@ -204,6 +260,11 @@ export default {
             actualBubble.active = false
           }
         })
+
+        if (allNewBubbles.length > 0) {
+          this.bubbles.push(...allNewBubbles)
+        }
+
         this.pressedBubbleIds.clear()
         this.bubbles = this.bubbles.filter(b => b.active)
       }, 100)
@@ -255,11 +316,38 @@ export default {
 
       const escapedBubbles = []
 
-      this.bubbles.forEach(bubble =>  {
+      this.bubbles.forEach(bubble => {
+        const prevX = bubble.x
+        const prevY = bubble.y
+
         bubble.x += bubble.speedX
         bubble.y += bubble.speedY
         bubble.wobble += bubble.wobbleSpeed
         bubble.x += Math.sin(bubble.wobble) * 0.5
+
+        if (this.pushedBubbles.has(bubble.id)) {
+          const pushData = this.pushedBubbles.get(bubble.id)
+
+          const stepDistance = this.euclideanDistance(bubble.x, bubble.y, prevX, prevY)
+          pushData.remainingDistance -= stepDistance
+          
+          if (pushData.remainingDistance <= 0) {
+            const targetSpeedX = pushData.originalSpeedX
+            const targetSpeedY = pushData.originalSpeedY
+
+            bubble.speedX = bubble.speedX * 0.95 + targetSpeedX * 0.05
+            bubble.speedY = bubble.speedY * 0.95 + targetSpeedY * 0.05
+
+            const speedDiff = Math.abs(bubble.speedX - targetSpeedX) + Math.abs(bubble.speedY - targetSpeedY)
+
+            if (speedDiff < 0.2) {
+              bubble.speedX = targetSpeedX
+              bubble.speedY = targetSpeedY
+              this.pushedBubbles.delete(bubble.id)
+            }
+          }
+        }        
+
 
         if (bubble.y - bubble.radius > this.canvasHeight + 100 || bubble.x + bubble.radius < -100 || bubble.x - bubble.radius > this.canvasWidth + 100) {
           if (bubble.color == this.targetColor) {
@@ -271,12 +359,18 @@ export default {
       })
 
       if (escapedBubbles.length > 0) {
-        const penaltyPoints = escapedBubbles.length * 5
-        this.score =  this.score - penaltyPoints
+        let totalPenalty = 0
+
+        escapedBubbles.forEach(bubble => {
+          const config = this.bubbleConfig.find(c => c.name === bubble.sizeName)
+          totalPenalty += config.escapePenalties
+        })
+
+        this.score =  this.score + totalPenalty
         this.multiplier = 1
         
         this.$emit('score', { 
-          points: -penaltyPoints, 
+          points: totalPenalty, 
           count: escapedBubbles.length,
           reason: 'escaped'
         })
@@ -316,25 +410,15 @@ export default {
       const spawnAreaStart = (this.canvasWidth - spawnAreaWidth) / 2
       const randomX = spawnAreaStart + Math.random() * spawnAreaWidth
 
-      const allColors = ['white', 'blue', 'red', 'green', 'yellow', 'purple', 'pink', 'orange']
-      let colors = allColors.slice(0, this.totalColors)
-      if (!colors.includes(this.targetColor)) {
-        colors = colors.slice(0, -1)
-        colors.push(this.targetColor)
-      }
-      
-      const newBubble = {
-        id: Date.now() + Math.random(),
-        color: colors[Math.floor(Math.random() * colors.length)],
+      const randomConfig = this.bubbleConfig[Math.floor(Math.random() * this.bubbleConfig.length)]
+      const randomColor = this.gameColors[Math.floor(Math.random() * this.gameColors.length)]
+
+      const newBubble = this.createBubble({
+        color: randomColor,
         x: randomX,
         y: -150,
-        radius: 40,
-        speedX: (Math.random() - 0.5) * 2,
-        speedY: 1 + Math.random() * 2,
-        wobble: Math.random() * Math.PI * 2,
-        wobbleSpeed: 0.02 + Math.random() * 0.03,
-        active: true
-      }
+        sizeName: randomConfig.name
+      })
       
       this.bubbles.push(newBubble)
     },
@@ -380,6 +464,7 @@ export default {
       this.paused = false
       this.bubbles = []
       this.pressedBubbleIds.clear()
+      this.pushedBubbles.clear()
 
       if (this.animationFrame) {
         cancelAnimationFrame(this.animationFrame)
@@ -401,6 +486,154 @@ export default {
       canvas.height = window.innerHeight
       this.canvasWidth = canvas.width
       this.canvasHeight = canvas.height
+    },
+    createBubble({color, x, y, sizeName}) {
+      const config = this.bubbleConfig.find(c => c.name === sizeName)
+
+      const speedX = ((Math.random() - 0.5) * 2) * config.speedMultiplier
+      const speedY = (1 + Math.random() * 2) * config.speedMultiplier
+
+      return {
+        id: Date.now() + Math.random(),
+        color: color,
+        x: x,
+        y: y,
+        radius: config.radius,
+        sizeName: sizeName,
+        speedX: speedX,
+        speedY: speedY,
+        wobble: Math.random() * Math.PI * 2,
+        wobbleSpeed: 0.02 + Math.random() * 0.03,
+        active: true,
+        isPopped: false
+      }
+    },
+    createChildBubbles(bubble, count, childSizeName, offset) {
+      const childBubbles = []
+      const angleStep = (2 * Math.PI) / count
+      
+      for (let i = 0; i < count; i++) {
+        const angle = (i * angleStep) + Math.random() * 0.2
+        const distance = bubble.radius + offset
+        const childX = bubble.x + Math.cos(angle) * distance
+        const childY = bubble.y + Math.sin(angle) * distance
+
+        let childColor
+        if (i === 0) {
+          childColor = bubble.color
+        } else {
+          childColor = this.gameColors[Math.floor(Math.random() * this.gameColors.length)]
+        }
+        
+        const childBubble = this.createBubble({
+          color: childColor,
+          x: childX,
+          y: childY,
+          sizeName: childSizeName
+        })
+        
+        childBubbles.push(childBubble)
+      }
+      
+      return childBubbles
+    },    
+    handleBubbleSplit(bubble) {
+      let childBubblesToAdd = []
+      const now = performance.now()
+      const maxSpeed = 4
+
+      if (bubble.sizeName === 'large') {
+        childBubblesToAdd = this.createChildBubbles(bubble, 3, 'medium', 20)
+      }
+      else if (bubble.sizeName === 'medium') {
+        childBubblesToAdd = this.createChildBubbles(bubble, 5, 'small', 10)
+      }
+
+      childBubblesToAdd.forEach(childBubble => {
+        const dx = childBubble.x - bubble.x
+        const dy = childBubble.y - bubble.y
+        const distance = Math.sqrt(dx * dx + dy * dy)
+        
+        if (distance > 0) {
+          const dirX = dx / distance
+          const dirY = dy / distance
+          
+          const multiplier = this.pushDistanceMap[bubble.sizeName]?.[childBubble.sizeName] || 1.0
+          const totalDistance = bubble.radius * multiplier
+          const decayTime = 2000
+          let initialSpeed = totalDistance / decayTime * 60
+          initialSpeed = Math.min(initialSpeed, maxSpeed)
+
+          this.pushedBubbles.set(childBubble.id, {
+            id: childBubble.id,
+            originalSpeedX: childBubble.speedX,
+            originalSpeedY: childBubble.speedY,
+            remainingDistance: totalDistance,
+            pushStartTime: now
+          })
+          
+          childBubble.speedX = dirX * initialSpeed
+          childBubble.speedY = dirY * initialSpeed
+        }
+      })
+
+      return childBubblesToAdd
+    },
+    pushBubblesAway(bubble, radiusMultiplier = 2, decayTime = 2000) {
+      const searchRadius = bubble.radius * radiusMultiplier
+      const foundBubbles = []
+      const now = performance.now()
+      const minTimeBetweenPushes = 100
+      const maxSpeed = 4
+
+      this.bubbles.forEach(otherBubble => {
+        if (!otherBubble.active || otherBubble.id === bubble.id || otherBubble.isPopped) return
+
+        const distance = this.euclideanDistance(bubble.x, bubble.y, otherBubble.x, otherBubble.y)
+        if (distance - otherBubble.radius <= searchRadius) {
+          foundBubbles.push(otherBubble)
+
+          const dx = otherBubble.x - bubble.x
+          const dy = otherBubble.y - bubble.y
+          const dirX = dx / distance
+          const dirY = dy / distance
+
+          const multiplier = this.pushDistanceMap[bubble.sizeName]?.[otherBubble.sizeName] || 1.0
+          const totalDistance = bubble.radius * multiplier
+
+          const existingPush = this.pushedBubbles.get(otherBubble.id)
+          const timeSinceLastPush = existingPush ? now - existingPush.pushStartTime : Infinity
+
+          if (existingPush && timeSinceLastPush > minTimeBetweenPushes) {
+            otherBubble.speedX = existingPush.originalSpeedX
+            otherBubble.speedY = existingPush.originalSpeedY
+            this.pushedBubbles.delete(otherBubble.id)
+          }
+
+          if (!this.pushedBubbles.has(otherBubble.id)) {
+            let initialSpeed = totalDistance / decayTime * 60
+            initialSpeed = Math.min(initialSpeed, maxSpeed)
+
+            this.pushedBubbles.set(otherBubble.id, {
+              id: otherBubble.id,
+              originalSpeedX: otherBubble.speedX,
+              originalSpeedY: otherBubble.speedY,
+              remainingDistance: totalDistance,
+              pushStartTime: now
+            })
+
+            otherBubble.speedX = dirX * initialSpeed
+            otherBubble.speedY = dirY * initialSpeed
+          }
+        }
+      })
+
+      return foundBubbles
+    },
+    euclideanDistance(x1, y1, x2, y2) {
+      const dx = x2 - x1
+      const dy = y2 - y1
+      return Math.sqrt(dx * dx + dy * dy)
     },
     playPopSound() {
       soundManager.play('pop')
