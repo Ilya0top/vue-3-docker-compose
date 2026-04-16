@@ -15,6 +15,7 @@
     </div>
 
     <BubbleGame
+      v-if="gameActive"
       ref="bubbleGame"
       :totalColors="getTotalColors"
       :targetColor="getTargetColor"
@@ -22,7 +23,7 @@
       :pointsForCorrect="getPointsForCorrect"
       :pointsForWrong="getPointsForWrong"
       :onStart="handleGameStart"
-      :gameDuration="60"
+      :gameDuration="40"
       @score="(data) => handleScore(data)"
       @finish="(result)  => handleFinish(result)"
     />
@@ -43,7 +44,9 @@ export default {
     return {
       gameFinished: false,
       finalScore: 0,
-      currentScore: 0
+      currentScore: 0,
+
+      gameActive: true
     }
   },
   computed: {
@@ -54,6 +57,17 @@ export default {
       'getPointsForCorrect',
       'getPointsForWrong'
     ])
+  },
+  beforeRouteLeave(to, from, next) {
+    
+    if (this.$refs.bubbleGame) {
+      this.$refs.bubbleGame.cleanupGame()
+    }
+    
+    this.gameActive = false
+    this.gameFinished = false
+    
+    next()
   },
   methods: {
     handleGameStart() {
@@ -149,13 +163,13 @@ export default {
         box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
         background: darken(#00d389, 10%);
       }
-    }
 
-    &__button--menu {
-      background: #3a3f44;
+      &--menu {
+        background: #3a3f44;
 
-      &:hover {
-        background: #4a4f54;
+        &:hover {
+          background: #4a4f54;
+        }
       }
     }
   }
